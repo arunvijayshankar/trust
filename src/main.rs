@@ -12,7 +12,7 @@ struct Quad {
 
 
 fn main() -> io::Result<()> {
-	let mut connections: HashMap<Quad, tcp::State> = Default::default();
+	let mut connections: HashMap<Quad, tcp::Connection> = Default::default();
 	let mut nic = tun_tap::Iface::new("tun0", tun_tap::Mode::Tun)?;
 	let mut buf = [0u8; 1504];
 	loop {
@@ -35,14 +35,28 @@ fn main() -> io::Result<()> {
  
 				match etherparse::TcpHeaderSlice::from_slice(&buf[4+iph.slice().len()..]) {
 					Ok(tcph) => {
+						use std::collections::hash_map::Entry;
 						let datai = 4 + iph.slice().len() + tcph.slice().len();
-						connections.entry(
-							Quad{
-								src: (src, tcph.source_port()),
-								dst: (dst, tcph.destination_port()),
+						match connections.entry(Quad{
+							src: (src, tcph.source_port()),
+							dst: (dst, tcph.destination_port()),
+						}) {
+							Entry::Occupied(mut c) => {
+								c.get_mut()
+									.on_packet(&mut nic, iph, tcph, &buf[datai..nbytes])?;
 							}
-						).or_default().on_packet(&mut nic, iph, tcph, &buf[datai..nbytes])?;
-					},
+							Entry::Vacant(mut e) => {
+								if let Some(c) = tcp::Connection::accept(
+									&mut nic,
+									iph, 
+									tcph, 
+									&buf[datai..nbytes]
+								)? {
+									e.insert(c);
+								}
+							}
+						}
+					}
 					Err(e) => {
 						eprintln!("Ignoring weird tcp packet {:?}", e);
 					}
