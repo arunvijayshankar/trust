@@ -5,6 +5,7 @@ enum State {
     SynRcvd,
     Estab,
     FinWait1,
+    FinWait2,
     Closing,
 }
 
@@ -12,7 +13,7 @@ impl State {
     fn is_synchronized(&self) -> bool {
         match *self {
             State::SynRcvd => false,
-            State::Estab | State::FinWait1 | State::Closing => true,
+            State::Estab | State::FinWait1 | State::Closing | State::FinWait2 => true,
         }
     }
 }
@@ -284,13 +285,13 @@ impl Connection {
                 // TODO: needs to be stored in the retransmission queue
                 self.tcp.fin = true;
                 self.write(nic, &[])?;
-                self.state = FinWait1;
+                self.state = State::FinWait1;
             }
 
             State::Estab => {
                 unimplemented!();
             }
-
+            
             State::FinWait1 => {
                 if !tcph.fin || !data.is_empty() {
                     unimplemented!();
@@ -298,9 +299,23 @@ impl Connection {
                 
                 // packet must be an ACK to our FIN, as at least one un-ACK'd byte has been ACK'd and we  
                 // sent a FIN
+                self.state = State::FinWait2;
+            }
+
+            State::Closing => {
+                if !tcph.fin || !data.is_empty() {
+                    unimplemented!();
+                }
+                
                 self.tcp.fin = false;
                 self.write(nic, &[])?;
-                self.state = Closing;
+                self.state = State::Closing;
+                
+                // packet must be an ACK to our FIN, as at least one un-ACK'd byte has been ACK'd and we  
+                // sent a FIN
+                self.tcp.fin = false;
+                self.write(nic, &[])?;
+                self.state = State::Closing;
             }
         }
         Ok(())
