@@ -6,14 +6,14 @@ enum State {
     Estab,
     FinWait1,
     FinWait2,
-    Closing,
+    TimeWait,
 }
 
 impl State {
     fn is_synchronized(&self) -> bool {
         match *self {
             State::SynRcvd => false,
-            State::Estab | State::FinWait1 | State::Closing | State::FinWait2 => true,
+            State::Estab | State::FinWait1 | State::FinWait2 | State::TimeWait => true,
         }
     }
 }
@@ -125,7 +125,7 @@ impl Connection {
                 tcph.source_port(), 
                 iss,  // 0 for now, truly random ISN implementation later
                 wnd,
-            );
+            ),
             ip: etherparse::Ipv4Header::new(
                 0,                
                 64, 
@@ -148,8 +148,8 @@ impl Connection {
 
         // start establishing a connection
 
-        self.tcp.syn = true;
-        self.tcp.ack = true;
+        c.tcp.syn = true;
+        c.tcp.ack = true;
         c.write(nic, &[])?;
         Ok(Some(c))
     }
@@ -160,7 +160,7 @@ impl Connection {
         self.tcp.acknowledgment_number = self.recv.nxt;
 
         let size = std::cmp::min(buf.len(), self.tcp.header_len() as usize + self.ip.header_len() as usize + payload.len(),);
-        self.ip.set_payload_len(size);
+        self.ip.set_payload_len(size - self.ip.header_len() as usize);
         // self.tcp.checksum = self.tcp
         // .calc_checksum_ipv4(&self.ip, &[])
         // .expect("failed to compute checksum"); This is not needed as it is handled by kernel
@@ -219,39 +219,24 @@ impl Connection {
         data: &'a [u8]
     ) -> io::Result<()> {
         //
-        // Check that seq. numbers are valid (RFC 793 S3.3)
-        // acceptable ack check
-        // SND.UNA < SEG.ACK =< SND.NXT
-        //
-
-        let ackn = tcph.acknowledgment_number();
-        if !is_between_wrapped(self.send.una, ackn, self.send.nxt.wrapping_add(1)) {
-            if !self.is_synchronized() {
-                // if we are not synchronized at this point, we should send a RST
-                self.send_reset(nic);
-            }
-            return Ok(());
-        }
-
-        //
         // valid segment check
         // RCV.NXT =< SEG.SEQ < RCV.NXT+RCV.WND
         // or
         // RCV.NXT =< SEG.SEQ+SEG.LEN-1 < RCV.NXT+RCV.WND
         //
         let seqn = tcph.sequence_number();
-        let slen = data.len() as u32;
+        let mut slen = data.len() as u32;
         if tcph.fin() {
             slen += 1;
-        }
+        };
         if tcph.syn() {
             slen += 1;
-        }
-        let wend = self.recv.next.wrapping_add(self.recv.wnd as u32);
+        };
+        let wend = self.recv.nxt.wrapping_add(self.recv.wnd as u32);
         if slen == 0 {
             //separate rules for acceptance apply if segment is of zero length
             if self.recv.wnd == 0 {
-                if seqn != self.recv.next {
+                if seqn != self.recv.nxt {
                     return Ok(());
                 }
             } else if !is_between_wrapped(self.recv.nxt.wrapping_sub(1), seqn, wend) {
@@ -261,70 +246,75 @@ impl Connection {
             if self.recv.wnd == 0 {
                 return Ok(())
             } else if !is_between_wrapped(self.recv.nxt.wrapping_sub(1), seqn, wend) && 
-                !is_between_wrapped(self.recv.nxt.wrapping_sub(1), seqn + slen - 1, wend) {
+                !is_between_wrapped(self.recv.nxt.wrapping_sub(1), seqn.wrapping_add( slen - 1 ), wend) {
                     return Ok(());
             }
         }
-        if !is_between_wrapped(self.recv.nxt.wrapping_sub(1), seqn, wend) && 
-         !is_between_wrapped(self.recv.nxt.wrapping_sub(1), seqn + slen - 1, wend) {
-            return Ok(());
-        }
+
+        self.recv.nxt = seqn.wrapping_add(slen);
+
+        //
+        // Check that seq. numbers are valid (RFC 793 S3.3)
+        // acceptable ack check
+        // SND.UNA < SEG.ACK =< SND.NXT
+        //
 
 
-        match self.state {
-            State::SynRcvd => {
-                // if we are in SynRcvd, we expect to get an ACK for our SYN (sent in resp to their ACK)
-                if !tcph.ack() {
-                    return Ok(());
-                }
+        let ackn = tcph.acknowledgment_number();
+        if let State::SynRcvd = self.state {
+            if !is_between_wrapped(self.send.una.wrapping_sub(1), ackn, self.send.nxt.wrapping_add(1)) {
                 // packet must be an ACK to our SYN, as at least one un-ACK'd byte has been ACK'd and we only 
                 // sent a SYN
-                self.state = Estab;
+                self.state = State::Estab;
 
-                // let's terminate the connection
-                // TODO: needs to be stored in the retransmission queue
-                self.tcp.fin = true;
-                self.write(nic, &[])?;
-                self.state = State::FinWait1;
-            }
-
-            State::Estab => {
-                unimplemented!();
-            }
-            
-            State::FinWait1 => {
-                if !tcph.fin || !data.is_empty() {
-                    unimplemented!();
-                }
-                
-                // packet must be an ACK to our FIN, as at least one un-ACK'd byte has been ACK'd and we  
-                // sent a FIN
-                self.state = State::FinWait2;
-            }
-
-            State::Closing => {
-                if !tcph.fin || !data.is_empty() {
-                    unimplemented!();
-                }
-                
-                self.tcp.fin = false;
-                self.write(nic, &[])?;
-                self.state = State::Closing;
-                
-                // packet must be an ACK to our FIN, as at least one un-ACK'd byte has been ACK'd and we  
-                // sent a FIN
-                self.tcp.fin = false;
-                self.write(nic, &[])?;
-                self.state = State::Closing;
+            } else {
+                // TODO: RST <SEQ=SND.NXT><ACK=RCV.NXT><CTL=ACK>
             }
         }
+        
+
+        if let State::Estab = self.state {
+            if !is_between_wrapped(self.send.una, ackn, self.send.nxt.wrapping_add(1)) {
+                return Ok(());
+            }
+            self.send.una = ackn;
+            // TODO: a lot, later
+            assert!(data.is_empty());
+            
+            // let's terminate the connection
+            // TODO: needs to be stored in the retransmission queue
+            self.tcp.fin = true;
+            self.write(nic, &[])?;
+            self.state = State::FinWait1;
+        }
+        
+        
+        if let State::FinWait1 = self.state {
+            if self.send.una == self.send.iss + 2 {
+                // our FIN has been ACK'd
+                self.state = State::FinWait2;
+            }
+        }
+
+        if tcph.fin() {
+            match self.state {
+                State::FinWait2 => {
+                    // we're done with the connection
+                    self.write(nic, &[])?;
+                    self.state = State::TimeWait;
+                },
+                _ => unreachable!(),
+            }
+        }
+
+
         Ok(())
     }
 }
 
 fn is_between_wrapped(start: u32, x: u32, end: u32) -> bool {
     use std::cmp::{Ordering};
-    match start.cmp(x) {
+    match start.cmp(&x) {
         Ordering::Equal => return false,
         Ordering::Less => {
             // check is violated iff end is b/w start and x
@@ -335,10 +325,11 @@ fn is_between_wrapped(start: u32, x: u32, end: u32) -> bool {
         Ordering::Greater => {
             // check is ok iff end is b/w start and x
             if end < start && end > x {
+                return true;
             } else {
                 return false;
-           }
+            }
         },
     }
-    true,
+    true
 }
