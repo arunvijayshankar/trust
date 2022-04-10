@@ -161,9 +161,9 @@ impl Connection {
 
         let size = std::cmp::min(buf.len(), self.tcp.header_len() as usize + self.ip.header_len() as usize + payload.len(),);
         self.ip.set_payload_len(size - self.ip.header_len() as usize);
-        // self.tcp.checksum = self.tcp
-        // .calc_checksum_ipv4(&self.ip, &[])
-        // .expect("failed to compute checksum"); This is not needed as it is handled by kernel
+        self.tcp.checksum = self.tcp
+         .calc_checksum_ipv4(&self.ip, &[])
+         .expect("failed to compute checksum"); 
         
         // write headers into buffer
         use std::io::Write;
@@ -233,22 +233,33 @@ impl Connection {
             slen += 1;
         };
         let wend = self.recv.nxt.wrapping_add(self.recv.wnd as u32);
-        if slen == 0 {
+        let okay = if slen == 0 {
             //separate rules for acceptance apply if segment is of zero length
             if self.recv.wnd == 0 {
                 if seqn != self.recv.nxt {
-                    return Ok(());
+                    false
+                } else {
+                    true
                 }
             } else if !is_between_wrapped(self.recv.nxt.wrapping_sub(1), seqn, wend) {
-                    return Ok(());
+                   false 
+            } else {
+                true
             }
         } else {
             if self.recv.wnd == 0 {
-                return Ok(())
+                false
             } else if !is_between_wrapped(self.recv.nxt.wrapping_sub(1), seqn, wend) && 
                 !is_between_wrapped(self.recv.nxt.wrapping_sub(1), seqn.wrapping_add( slen - 1 ), wend) {
-                    return Ok(());
+                    false
+            } else {
+                true
             }
+        };
+
+        if !okay {
+            self.write(nic, &[])?;
+            return Ok(());
         }
 
         self.recv.nxt = seqn.wrapping_add(slen);
@@ -262,30 +273,31 @@ impl Connection {
 
         let ackn = tcph.acknowledgment_number();
         if let State::SynRcvd = self.state {
-            if !is_between_wrapped(self.send.una.wrapping_sub(1), ackn, self.send.nxt.wrapping_add(1)) {
+            if is_between_wrapped(self.send.una.wrapping_sub(1), ackn, self.send.nxt.wrapping_add(1)) {
                 // packet must be an ACK to our SYN, as at least one un-ACK'd byte has been ACK'd and we only 
                 // sent a SYN
                 self.state = State::Estab;
-
             } else {
                 // TODO: RST <SEQ=SND.NXT><ACK=RCV.NXT><CTL=ACK>
+                println!("Arun: it looks like ack is not b/w una and nxt");
             }
         }
         
 
-        if let State::Estab = self.state {
+        if let State::Estab | State::FinWait1 | State::FinWait2 = self.state {
             if !is_between_wrapped(self.send.una, ackn, self.send.nxt.wrapping_add(1)) {
                 return Ok(());
             }
             self.send.una = ackn;
             // TODO: a lot, later
             assert!(data.is_empty());
-            
             // let's terminate the connection
             // TODO: needs to be stored in the retransmission queue
-            self.tcp.fin = true;
-            self.write(nic, &[])?;
-            self.state = State::FinWait1;
+            if let State::Estab = self.state {
+                self.tcp.fin = true;
+                self.write(nic, &[])?;
+                self.state = State::FinWait1;
+            }
         }
         
         
