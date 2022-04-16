@@ -5,7 +5,7 @@ use std::net::Ipv4Addr;
 mod tcp;
 
 #[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
-struct Quad {
+struct Quad { // This struct identifies each connection
 	src: (Ipv4Addr, u16), // (<ip_addr>, <port>)
 	dst: (Ipv4Addr, u16),
 }

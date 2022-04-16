@@ -1,6 +1,6 @@
 use std::io;
 
-enum State {
+enum State { // enum to hold connection state value
     // Listen,
     SynRcvd,
     Estab,
@@ -18,7 +18,7 @@ impl State {
     }
 }
 
-pub struct Connection {
+pub struct Connection { // struct to hold the state of a particular connection [src ip, src port, dest ip, dest src]
     state: State,
     send: SendSequenceSpace,
     recv: RecvSequenceSpace,
@@ -41,7 +41,7 @@ pub struct Connection {
 ///
 /// ...
 
-struct SendSequenceSpace {
+struct SendSequenceSpace { // holds field values of TCP segment that is to be sent out
     /// send unacknowledged
     una: u32,
     /// send next
@@ -74,7 +74,7 @@ struct SendSequenceSpace {
 ///
 /// ...
 
-struct RecvSequenceSpace {
+struct RecvSequenceSpace { // field values parsed from a TCP segment that was received
     /// receive next
     nxt: u32,
     /// receive window
